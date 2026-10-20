@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leadagent"
+version = "0.1.0"
+description = "Evidence-backed lead-finder agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    "pydantic>=2",
+    "pydantic-settings",
+    "httpx",
+    "trafilatura",
+    "pymupdf",
+    "tldextract",
+    "dnspython",
+    "email-validator",
+    "gspread",
+    "google-auth",
+    "google-genai",
+    "typer",
+]
+
+[project.optional-dependencies]
+search = ["tavily-python", "ddgs"]
+dev = ["pytest", "pytest-asyncio", "respx", "ruff", "mypy"]
+
+[project.scripts]
+leadagent = "leadagent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["leadagent*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
