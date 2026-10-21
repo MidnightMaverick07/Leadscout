@@ -133,3 +133,6 @@ class GraphRecursionLimitReached(LeadscoutError):
     def __init__(self, context: str) -> None:
         self.context = context
         super().__init__(f"Recursion limit reached in {context!r}")
+
+class EvidenceNotFoundError(LeadscoutError):
+    """Raised when an evidence ID does not exist in the store."""
