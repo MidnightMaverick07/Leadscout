@@ -8,10 +8,12 @@ Section references: §4.1–4.8, §3.4.4.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
+
+from leadagent.errors import RejectionReason
 
 # ── §4.1 Enums (expressed as Literals for Pydantic v2 compatibility) ─────────
 
@@ -67,6 +69,16 @@ MailboxStatus = Literal["confirmed", "undeliverable", "unknown", "not_checked"]
 
 Currentness = Literal["current", "plausibly_current", "stale", "unknown"]
 
+SearchFacetAngle = Literal[
+    "official_website",
+    "past_sponsors",
+    "leadership",
+    "csr",
+    "partnerships",
+    "college_societies",
+    "office_bearers",
+]
+
 ResearchActionKind = Literal[
     "FETCH",
     "RETRY",
@@ -96,19 +108,56 @@ StopReason = Literal[
     "internal_error",
 ]
 
+RunStatus = Literal["running", "completed", "failed", "cancelled"]
+
+
+# ── UTC timestamp enforcement (§2 principle 11, §4.2) ─────────────────────────
+
+def _require_aware_utc(v: datetime | None) -> datetime | None:
+    """Reject naive datetimes; convert aware datetimes to UTC."""
+    if v is None:
+        return None
+    if v.tzinfo is None or v.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware (use UTC)")
+    return v.astimezone(timezone.utc)
+
+
+class UTCModel(BaseModel):
+    """Base class for models with timestamps.
+
+    Every named datetime field is validated. check_fields=False lets one
+    validator cover fields that only some subclasses define.
+    """
+
+    @field_validator(
+        "fetched_at",
+        "published_at",
+        "checked_at",
+        "accepted_at",
+        "rejected_at",
+        "timestamp",
+        "retrieved_at",
+        "started_at",
+        "finished_at",
+        check_fields=False,
+    )
+    @classmethod
+    def _timestamps_utc_aware(cls, v: datetime | None) -> datetime | None:
+        return _require_aware_utc(v)
+
 
 # ── §4.2 Evidence ─────────────────────────────────────────────────────────────
 
-class Evidence(BaseModel):
+class Evidence(UTCModel):
     """A single piece of evidence supporting a claim.
 
-    ``source_uri`` is always required and stable — for brochure evidence use
+    ``source_uri`` is always required and stable. For brochure evidence use
     a synthetic URI like ``brochure:<sha256>#page=3`` (never a fabricated URL).
     ``url`` is only populated for genuine HTTP(S) evidence.
     """
 
     id: str
-    source_uri: str  # URL or stable synthetic URI
+    source_uri: str
     url: HttpUrl | None = None
     source_kind: SourceKind
     acquisition_method: AcquisitionMethod
@@ -138,7 +187,7 @@ class Target(BaseModel):
     id: str
     name: str
     category: Category
-    city_hint: str | None = None
+    city_hint: str | None = None  # research hint only; never a lead location
     official_domain: str | None = None
     origin: Literal["prompt_search", "brochure", "lookalike_search"]
     relevance_score: float = Field(ge=0.0, le=1.0)
@@ -184,7 +233,7 @@ class PersonCandidate(BaseModel):
 
 # ── §4.5 Contact verification ─────────────────────────────────────────────────
 
-class EmailVerificationReport(BaseModel):
+class EmailVerificationReport(UTCModel):
     """Detailed email verification results (§4.5)."""
 
     channel: str  # normalized email address
@@ -204,7 +253,7 @@ class EmailVerificationReport(BaseModel):
     notes: str = ""
 
 
-class ProfileVerificationReport(BaseModel):
+class ProfileVerificationReport(UTCModel):
     """Detailed profile-URL verification results (§4.5)."""
 
     channel: str  # canonicalized profile URL
@@ -224,7 +273,7 @@ class ProfileVerificationReport(BaseModel):
 
 # ── §4.6 Accepted lead ────────────────────────────────────────────────────────
 
-class Lead(BaseModel):
+class Lead(UTCModel):
     """A fully verified, accepted lead ready for sheet output.
 
     The external sheet writer maps this to exactly six cells in the Leads tab.
@@ -276,49 +325,58 @@ class Lead(BaseModel):
 
 # ── §4.7 Rejection ────────────────────────────────────────────────────────────
 
-class Rejection(BaseModel):
+class Rejection(UTCModel):
     """A rejected candidate with a stable, machine-readable reason code."""
 
     org_key: str
     candidate_key: str
-    reason: str  # one of the stable codes from errors.py RejectionReason
+    reason: RejectionReason
     details: str = ""
     rejected_at: datetime
 
 
-# ── Research / orchestration models ───────────────────────────────────────────
+# ── Run input and persisted run record ────────────────────────────────────────
 
 class RunInput(BaseModel):
-    """Validated top-level input — either a prompt string or a PDF path."""
+    """Validated top-level input: exactly one of a prompt or a PDF path (§5.1)."""
 
     input_type: InputType
-    prompt: str | None = None  # natural-language brief
-    pdf_path: str | None = None  # absolute local path validated by input_router
+    prompt: str | None = None
+    pdf_path: str | None = None  # absolute local path, validated by input_router
     raw_prompt: str = ""  # original, unsanitized prompt for audit
 
     @field_validator("prompt")
     @classmethod
-    def prompt_not_blank_when_prompt_mode(cls, v: str | None) -> str | None:
+    def prompt_not_blank(cls, v: str | None) -> str | None:
         if v is not None and not v.strip():
             raise ValueError("prompt must not be blank")
         return v
 
+    @model_validator(mode="after")
+    def exactly_one_input_mode(self) -> RunInput:
+        if self.input_type == "prompt":
+            if not self.prompt or self.pdf_path:
+                raise ValueError("prompt mode requires prompt and no pdf_path")
+        elif self.input_type == "pdf":
+            if not self.pdf_path or self.prompt:
+                raise ValueError("pdf mode requires pdf_path and no prompt")
+        return self
 
-class SearchFacetAngle(str):
-    """Allowed search angles for the query planner (§5.2)."""
 
-    ALLOWED = frozenset(
-        {
-            "official_website",
-            "past_sponsors",
-            "leadership",
-            "csr",
-            "partnerships",
-            "college_societies",
-            "office_bearers",
-        }
-    )
+class RunRecord(UTCModel):
+    """Persisted run status for the storage layer (§9.1)."""
 
+    run_id: str
+    input_type: InputType
+    input_hash: str  # hash of the sanitized input, never raw brochure text
+    status: RunStatus = "running"
+    stop_reason: StopReason | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    config_snapshot: dict[str, Any] = Field(default_factory=dict)  # non-secret values only
+
+
+# ── Research / orchestration models ───────────────────────────────────────────
 
 class QueryFacet(BaseModel):
     """One structured search facet produced by the query planner."""
@@ -326,15 +384,7 @@ class QueryFacet(BaseModel):
     industry: str | None = None
     organization_type: str | None = None
     city: str | None = None
-    angle: Literal[
-        "official_website",
-        "past_sponsors",
-        "leadership",
-        "csr",
-        "partnerships",
-        "college_societies",
-        "office_bearers",
-    ]
+    angle: SearchFacetAngle
     category: Category
 
 
@@ -367,6 +417,12 @@ class OrgInput(BaseModel):
     event_profile_summary: str  # clipped summary, never the full RunState
     category: Category
 
+    @model_validator(mode="after")
+    def category_matches_target(self) -> OrgInput:
+        if self.category != self.target.category:
+            raise ValueError("OrgInput.category must match target.category")
+        return self
+
 
 class ResearchAction(BaseModel):
     """An action returned by the deterministic router (§5.8)."""
@@ -377,9 +433,10 @@ class ResearchAction(BaseModel):
     query: str | None = None
 
 
-class ResearchEvent(BaseModel):
+class ResearchEvent(UTCModel):
     """One step in the per-organization research trail (§4.7, §5.8)."""
 
+    event_id: str  # stable ID computed by the repository (run_id + org_key + sequence)
     org_key: str
     action_kind: ResearchActionKind
     source_or_query: str = ""
@@ -422,12 +479,12 @@ class SheetWriteState(BaseModel):
     last_write_cursor: int = 0
 
 
-class SearchResult(BaseModel):
+class SearchResult(UTCModel):
     """Normalized search result from any provider (§5.4)."""
 
     title: str
-    url: str
+    url: HttpUrl  # http/https only; rejects javascript:, file:, etc.
     snippet: str
     source_provider: str
-    rank: int
+    rank: int = Field(ge=1)
     retrieved_at: datetime

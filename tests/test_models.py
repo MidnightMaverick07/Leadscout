@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+_NOW = datetime.now(timezone.utc)
+
 import pytest
 from pydantic import ValidationError
 
@@ -407,6 +409,7 @@ class TestSearchResult:
 class TestResearchEvent:
     def test_valid_construction(self) -> None:
         ev = ResearchEvent(
+            event_id="evt-acme-0001",
             org_key="acme-corp",
             action_kind="FETCH",
             source_or_query="https://acmecorp.example.com/team",
@@ -414,15 +417,33 @@ class TestResearchEvent:
             timestamp=_NOW,
         )
         assert ev.action_kind == "FETCH"
+        assert ev.event_id == "evt-acme-0001"
 
     def test_invalid_action_kind_rejected(self) -> None:
         with pytest.raises(ValidationError):
             ResearchEvent(
+                event_id="evt-acme-0002",
                 org_key="acme",
                 action_kind="INVALID_ACTION",  # type: ignore[arg-type]
                 timestamp=_NOW,
             )
 
+    def test_missing_event_id_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ResearchEvent(
+                org_key="acme",
+                action_kind="FETCH",
+                timestamp=_NOW,
+            )  # type: ignore[call-arg]
+
+    def test_naive_timestamp_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            ResearchEvent(
+                event_id="evt-acme-0003",
+                org_key="acme",
+                action_kind="FETCH",
+                timestamp=datetime(2026, 10, 21, 12, 0),  # naive, no tzinfo
+            )
 
 # ── RejectionReason enum ──────────────────────────────────────────────────────
 
